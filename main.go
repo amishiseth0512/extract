@@ -2,17 +2,46 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"os"
+
+	"github.com/nats-io/nats.go"
 )
 
 func main() {
-	req, err := http.NewRequest(http.MethodGet, "https://api.box.com/2.0/events", nil)
+	nc, err := nats.Connect(nats.DefaultURL)
 	if err != nil {
 		log.Fatal(err)
 	}
-	req.Header.Set("authorization", "Bearer <ACCESS_TOKEN>")
+	js, err := nc.JetStream()
+	if err != nil {
+		log.Fatal(err)
+	}
+	streamName := "etl"
+	subjects := []string{"etl.*"}
+
+	cfg := &nats.StreamConfig{
+		Name:      streamName,
+		Subjects:  subjects,
+		Storage:   nats.FileStorage,
+		Retention: nats.LimitsPolicy,
+		Replicas:  1,
+	}
+	_, err = js.AddStream(cfg)
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("Stream '%s' created successfully.\n", streamName)
+
+	req, err := http.NewRequest(http.MethodGet, "https://api.openai.com/v1/organization/audit_logs", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", os.Getenv("ADMIN_KEY")))
+	req.Header.Set("Content-Type", "application/json")
 	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -22,17 +51,25 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	type data struct{
-		Entries []json.RawMessage `json:"entries"`
+	type auditLogsResponse struct {
+		Data []json.RawMessage `json:"data"`
 	}
-	var entries data 
-	err = json.Unmarshal(body, &entries)
+	var data auditLogsResponse
+	err = json.Unmarshal(body, &data)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	for _,value := range entries.Entries {
-		
+	for _, value := range data.Data {
+		msg, err := json.Marshal(value)
+		if err != nil {
+			log.Fatal(err)
+		}
+		_, err = js.Publish("etl.open-ai-audit-logs", msg)
+		if err != nil {
+			log.Fatalf("Error publishing message: %v", err)
+		}
+		fmt.Println("Message published synchronously.")
 	}
 
 }
